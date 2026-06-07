@@ -1,4 +1,4 @@
-module batch-rename-hash
+module switch-hosts-cli
 
 go 1.22
 

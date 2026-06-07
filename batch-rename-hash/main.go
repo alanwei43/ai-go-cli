@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/spf13/cobra"
 )
 
 const mapFileName = "file_map.txt"
@@ -51,61 +53,39 @@ func (l *logger) elapsed() time.Duration {
 
 var log *logger
 
-func main() {
-	dir, keepOldFile, verbose, err := parseArgs(os.Args[1:])
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		printUsage()
-		os.Exit(2)
-	}
+var (
+	keepOldFile bool
+	verbose     bool
+)
 
-	log = &logger{verbose: verbose, start: time.Now()}
-	if err := run(dir, keepOldFile); err != nil {
-		fmt.Fprintf(os.Stderr, "\n错误: %v\n", err)
+var rootCmd = &cobra.Command{
+	Use:   "batch-rename-hash <目录>",
+	Short: "批量将文件重命名为其内容的 SHA-256 hash 值",
+	Long: `批量将文件重命名为其内容的 SHA-256 hash 值。
+
+扫描指定目录下的所有文件，将文件名替换为文件内容的 SHA-256 哈希值，
+同时保留原文件扩展名。操作完成后会生成 file_map.txt 映射文件记录对应关系。`,
+	Args: cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		dir := args[0]
+		log = &logger{verbose: verbose, start: time.Now()}
+		if err := run(dir, keepOldFile); err != nil {
+			fmt.Fprintf(os.Stderr, "\n错误: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("\n总耗时: %s\n", log.elapsed())
+	},
+}
+
+func init() {
+	rootCmd.Flags().BoolVar(&keepOldFile, "keep-old-file", false, "保留原文件，复制一份以 hash 命名的新文件")
+	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "显示详细日志")
+}
+
+func main() {
+	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
-	fmt.Printf("\n总耗时: %s\n", log.elapsed())
-}
-
-func parseArgs(args []string) (string, bool, bool, error) {
-	var dir string
-	var keepOldFile bool
-	var verbose bool
-
-	for _, arg := range args {
-		switch arg {
-		case "--keep-old-file":
-			keepOldFile = true
-		case "-v", "--verbose":
-			verbose = true
-		case "-h", "--help":
-			return "", false, false, errors.New("help requested")
-		default:
-			if strings.HasPrefix(arg, "-") {
-				return "", false, false, fmt.Errorf("未知选项: %s", arg)
-			}
-			if dir != "" {
-				return "", false, false, fmt.Errorf("意外的参数: %s", arg)
-			}
-			dir = arg
-		}
-	}
-
-	if dir == "" {
-		return "", false, false, errors.New("缺少目录参数")
-	}
-	return dir, keepOldFile, verbose, nil
-}
-
-func printUsage() {
-	fmt.Fprintf(os.Stderr, "用法: %s <目录> [选项]\n", filepath.Base(os.Args[0]))
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "批量将文件重命名为其内容的 SHA-256 hash 值")
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "选项:")
-	fmt.Fprintln(os.Stderr, "  --keep-old-file    保留原文件，复制一份以 hash 命名的新文件")
-	fmt.Fprintln(os.Stderr, "  -v, --verbose      显示详细日志")
-	fmt.Fprintln(os.Stderr, "  -h, --help         显示帮助信息")
 }
 
 func run(root string, keepOldFile bool) error {

@@ -18,3 +18,4 @@
 - [auto-zip](./auto-zip/) — 定时对指定目录进行 zip 打包，支持密码加密和 cron 调度
 - [batch-rename-hash](./batch-rename-hash/) — 将文件重命名为其内容的 SHA-256 哈希值（保留扩展名）
 - [github-release-downloader](./github-release-downloader/) — 下载指定 GitHub 仓库 Release 的产物文件
+- [switch-hosts-cli](./switch-hosts-cli/) — 订阅远程 hosts 配置并更新本机 hosts，或定时上报本机内网 IP

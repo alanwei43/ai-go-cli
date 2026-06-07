@@ -37,7 +37,7 @@ for mod_file in */go.mod; do
     fi
 
     echo "    $goos/$goarch -> $output"
-    (cd "$dir" && CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -o "build/$output" .)
+    (cd "$dir" && CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "build/$output" .)
   done
 
   echo "    Done: $build_dir/"
