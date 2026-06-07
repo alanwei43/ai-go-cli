@@ -40,8 +40,9 @@ func (l *logger) elapsed() time.Duration {
 var log *logger
 
 var (
-	handle string
+	handle  string
 	verbose bool
+	ignores []string
 )
 
 var rootCmd = &cobra.Command{
@@ -62,7 +63,7 @@ var rootCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		if err := run(source, target, handle); err != nil {
+		if err := run(source, target, handle, ignores); err != nil {
 			fmt.Fprintf(os.Stderr, "\n错误: %v\n", err)
 			os.Exit(1)
 		}
@@ -73,6 +74,7 @@ var rootCmd = &cobra.Command{
 func init() {
 	rootCmd.Flags().StringVar(&handle, "handle", "copy", "操作方式: copy（复制）或 move（移动）")
 	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "显示详细日志")
+	rootCmd.Flags().StringArrayVar(&ignores, "ignore", nil, "忽略的文件夹名或文件名，可多次指定")
 }
 
 func main() {
@@ -87,7 +89,7 @@ type fileEntry struct {
 	FileSize   int64
 }
 
-func run(source, target, handle string) error {
+func run(source, target, handle string, ignores []string) error {
 	const totalSteps = 4
 
 	// 步骤 1: 验证目录
@@ -119,7 +121,7 @@ func run(source, target, handle string) error {
 
 	// 步骤 2: 扫描源目录
 	log.step(2, totalSteps, "扫描文件")
-	entries, err := collectEntries(absSource)
+	entries, err := collectEntries(absSource, ignores)
 	if err != nil {
 		return err
 	}
@@ -144,7 +146,7 @@ func run(source, target, handle string) error {
 	// 步骤 4: 移动模式下删除空目录
 	if handle == "move" {
 		log.step(4, totalSteps, "清理空目录")
-		removed, err := removeEmptyDirs(absSource)
+		removed, err := removeEmptyDirs(absSource, ignores)
 		if err != nil {
 			return err
 		}
@@ -171,14 +173,33 @@ func run(source, target, handle string) error {
 	return nil
 }
 
-func collectEntries(root string) ([]fileEntry, error) {
+func collectEntries(root string, ignores []string) ([]fileEntry, error) {
 	var entries []fileEntry
 	var fileCount int
+
+	ignoreSet := newIgnoreSet(ignores)
 
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
+
+		// 忽略 . 开头的隐藏文件和文件夹
+		if strings.HasPrefix(d.Name(), ".") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// 忽略 --ignore 指定的文件名或文件夹名
+		if ignoreSet.match(d.Name()) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
 		if d.IsDir() {
 			return nil
 		}
@@ -319,19 +340,9 @@ func buildHashedFileName(fileName, hash string) string {
 	return nameWithoutExt + "." + hash + ext
 }
 
-func removeEmptyDirs(root string) (int, error) {
+func removeEmptyDirs(root string, ignores []string) (int, error) {
 	var removedCount int
-
-	// 从底向上遍历，删除空目录
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		return nil
-	})
-	if err != nil {
-		return 0, err
-	}
+	ignoreSet := newIgnoreSet(ignores)
 
 	// 反复扫描删除空目录，直到没有空目录为止
 	for {
@@ -345,6 +356,14 @@ func removeEmptyDirs(root string) (int, error) {
 					return nil
 				}
 				return walkErr
+			}
+			// 忽略 . 开头的隐藏目录（跳过整个子树）
+			if d.IsDir() && strings.HasPrefix(d.Name(), ".") && !samePath(path, root) {
+				return filepath.SkipDir
+			}
+			// 忽略 --ignore 指定的目录
+			if d.IsDir() && ignoreSet.match(d.Name()) && !samePath(path, root) {
+				return filepath.SkipDir
 			}
 			if !d.IsDir() {
 				return nil
@@ -435,4 +454,21 @@ func isCrossDeviceError(err error) bool {
 		return linkErr.Err.Error() == "invalid cross-device link"
 	}
 	return false
+}
+
+// ignoreSet 用于高效判断文件名或目录名是否应被忽略
+type ignoreSet struct {
+	set map[string]bool
+}
+
+func newIgnoreSet(items []string) ignoreSet {
+	s := make(map[string]bool, len(items))
+	for _, item := range items {
+		s[item] = true
+	}
+	return ignoreSet{set: s}
+}
+
+func (is ignoreSet) match(name string) bool {
+	return is.set[name]
 }

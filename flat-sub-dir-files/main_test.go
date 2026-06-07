@@ -270,7 +270,7 @@ func TestCollectEntries(t *testing.T) {
 	writeFile(t, dir, "sub1/sub2/c.txt", "ccc")
 	writeFile(t, dir, "sub3/d.txt", "ddd")
 
-	entries, err := collectEntries(dir)
+	entries, err := collectEntries(dir, nil)
 	if err != nil {
 		t.Fatalf("collectEntries() error = %v", err)
 	}
@@ -294,7 +294,7 @@ func TestCollectEntries(t *testing.T) {
 func TestCollectEntriesEmptyDir(t *testing.T) {
 	dir := createTempDir(t)
 
-	entries, err := collectEntries(dir)
+	entries, err := collectEntries(dir, nil)
 	if err != nil {
 		t.Fatalf("collectEntries() error = %v", err)
 	}
@@ -312,7 +312,7 @@ func TestCollectEntriesSkipsNonRegularFiles(t *testing.T) {
 	linkPath := filepath.Join(dir, "link.txt")
 	os.Symlink(filepath.Join(dir, "regular.txt"), linkPath)
 
-	entries, err := collectEntries(dir)
+	entries, err := collectEntries(dir, nil)
 	if err != nil {
 		t.Fatalf("collectEntries() error = %v", err)
 	}
@@ -323,6 +323,44 @@ func TestCollectEntriesSkipsNonRegularFiles(t *testing.T) {
 	}
 	if entries[0].FileName != "regular.txt" {
 		t.Errorf("collectEntries()[0].FileName = %q, want %q", entries[0].FileName, "regular.txt")
+	}
+}
+
+func TestCollectEntriesSkipsHiddenFilesAndDirs(t *testing.T) {
+	dir := createTempDir(t)
+	writeFile(t, dir, "a.txt", "aaa")
+	writeFile(t, dir, ".hidden_file", "hidden")
+	writeFile(t, dir, "sub/b.txt", "bbb")
+	writeFile(t, dir, ".hidden_dir/c.txt", "should be skipped")
+	writeFile(t, dir, "sub/.hidden", "should be skipped")
+
+	entries, err := collectEntries(dir, nil)
+	if err != nil {
+		t.Fatalf("collectEntries() error = %v", err)
+	}
+
+	if len(entries) != 2 {
+		t.Fatalf("collectEntries() 应跳过隐藏文件和隐藏目录，got %d 个文件", len(entries))
+	}
+
+	names := make(map[string]bool)
+	for _, e := range entries {
+		names[e.FileName] = true
+	}
+	if !names["a.txt"] {
+		t.Error("应包含 a.txt")
+	}
+	if !names["b.txt"] {
+		t.Error("应包含 b.txt")
+	}
+	if names[".hidden_file"] {
+		t.Error("应跳过 .hidden_file")
+	}
+	if names["c.txt"] {
+		t.Error("应跳过 .hidden_dir 下的 c.txt")
+	}
+	if names[".hidden"] {
+		t.Error("应跳过 .hidden")
 	}
 }
 
@@ -419,7 +457,7 @@ func TestProcessEntriesCopy(t *testing.T) {
 	writeFile(t, sourceDir, "sub/b.txt", "bbb")
 	writeFile(t, sourceDir, "sub/deep/c.txt", "ccc")
 
-	entries, err := collectEntries(sourceDir)
+	entries, err := collectEntries(sourceDir, nil)
 	if err != nil {
 		t.Fatalf("collectEntries() error = %v", err)
 	}
@@ -465,7 +503,7 @@ func TestProcessEntriesCopyWithConflict(t *testing.T) {
 	writeFile(t, sourceDir, "sub/hello.txt", "source hello")
 	writeFile(t, targetDir, "hello.txt", "target hello")
 
-	entries, err := collectEntries(sourceDir)
+	entries, err := collectEntries(sourceDir, nil)
 	if err != nil {
 		t.Fatalf("collectEntries() error = %v", err)
 	}
@@ -504,7 +542,7 @@ func TestProcessEntriesMove(t *testing.T) {
 	writeFile(t, sourceDir, "a.txt", "aaa")
 	writeFile(t, sourceDir, "sub/b.txt", "bbb")
 
-	entries, err := collectEntries(sourceDir)
+	entries, err := collectEntries(sourceDir, nil)
 	if err != nil {
 		t.Fatalf("collectEntries() error = %v", err)
 	}
@@ -532,7 +570,7 @@ func TestProcessEntriesMoveWithConflict(t *testing.T) {
 	writeFile(t, sourceDir, "sub/hello.txt", "source hello")
 	writeFile(t, targetDir, "hello.txt", "target hello")
 
-	entries, err := collectEntries(sourceDir)
+	entries, err := collectEntries(sourceDir, nil)
 	if err != nil {
 		t.Fatalf("collectEntries() error = %v", err)
 	}
@@ -563,7 +601,7 @@ func TestRemoveEmptyDirs(t *testing.T) {
 	os.MkdirAll(filepath.Join(dir, "x/y"), 0755)
 	writeFile(t, dir, "a/b/file.txt", "keep")
 
-	removed, err := removeEmptyDirs(dir)
+	removed, err := removeEmptyDirs(dir, nil)
 	if err != nil {
 		t.Fatalf("removeEmptyDirs() error = %v", err)
 	}
@@ -589,7 +627,7 @@ func TestRemoveEmptyDirsNoEmptyDirs(t *testing.T) {
 	dir := createTempDir(t)
 	writeFile(t, dir, "a.txt", "hello")
 
-	removed, err := removeEmptyDirs(dir)
+	removed, err := removeEmptyDirs(dir, nil)
 	if err != nil {
 		t.Fatalf("removeEmptyDirs() error = %v", err)
 	}
@@ -602,7 +640,7 @@ func TestRemoveEmptyDirsNoEmptyDirs(t *testing.T) {
 func TestRemoveEmptyDirsPreservesRoot(t *testing.T) {
 	dir := createTempDir(t)
 	// 根目录本身为空，但不应被删除
-	removed, err := removeEmptyDirs(dir)
+	removed, err := removeEmptyDirs(dir, nil)
 	if err != nil {
 		t.Fatalf("removeEmptyDirs() error = %v", err)
 	}
@@ -613,6 +651,32 @@ func TestRemoveEmptyDirsPreservesRoot(t *testing.T) {
 
 	if !fileExists(dir) {
 		t.Error("根目录不应被删除")
+	}
+}
+
+func TestRemoveEmptyDirsSkipsHiddenDirs(t *testing.T) {
+	dir := createTempDir(t)
+	os.MkdirAll(filepath.Join(dir, "empty_sub"), 0755)
+	os.MkdirAll(filepath.Join(dir, ".hidden_empty"), 0755)
+	os.MkdirAll(filepath.Join(dir, ".hidden_with_file/nested"), 0755)
+	writeFile(t, dir, ".hidden_with_file/secret.txt", "keep")
+
+	removed, err := removeEmptyDirs(dir, nil)
+	if err != nil {
+		t.Fatalf("removeEmptyDirs() error = %v", err)
+	}
+
+	// 只有 empty_sub 应被删除
+	if removed != 1 {
+		t.Errorf("removeEmptyDirs() 删除数 = %d, want 1", removed)
+	}
+
+	// 隐藏目录应保留
+	if !fileExists(filepath.Join(dir, ".hidden_empty")) {
+		t.Error("隐藏空目录 .hidden_empty 不应被删除")
+	}
+	if !fileExists(filepath.Join(dir, ".hidden_with_file")) {
+		t.Error("隐藏目录 .hidden_with_file 不应被删除")
 	}
 }
 
@@ -663,7 +727,7 @@ func TestRunCopy(t *testing.T) {
 	// 初始化全局 logger
 	log = &logger{verbose: false, start: time.Now()}
 
-	if err := run(sourceDir, targetDir, "copy"); err != nil {
+	if err := run(sourceDir, targetDir, "copy", nil); err != nil {
 		t.Fatalf("run() copy error = %v", err)
 	}
 
@@ -695,7 +759,7 @@ func TestRunMove(t *testing.T) {
 
 	log = &logger{verbose: false, start: time.Now()}
 
-	if err := run(sourceDir, targetDir, "move"); err != nil {
+	if err := run(sourceDir, targetDir, "move", nil); err != nil {
 		t.Fatalf("run() move error = %v", err)
 	}
 
@@ -719,7 +783,7 @@ func TestRunMove(t *testing.T) {
 func TestRunSourceNotExist(t *testing.T) {
 	log = &logger{verbose: false, start: time.Now()}
 
-	err := run("/nonexistent/dir", "/tmp/target", "copy")
+	err := run("/nonexistent/dir", "/tmp/target", "copy", nil)
 	if err == nil {
 		t.Error("run() 源目录不存在时应返回错误")
 	}
@@ -731,7 +795,7 @@ func TestRunEmptySourceDir(t *testing.T) {
 
 	log = &logger{verbose: false, start: time.Now()}
 
-	if err := run(sourceDir, targetDir, "copy"); err != nil {
+	if err := run(sourceDir, targetDir, "copy", nil); err != nil {
 		t.Fatalf("run() 空源目录不应返回错误: %v", err)
 	}
 
@@ -751,7 +815,7 @@ func TestRunWithSameNameConflict(t *testing.T) {
 
 	log = &logger{verbose: false, start: time.Now()}
 
-	if err := run(sourceDir, targetDir, "copy"); err != nil {
+	if err := run(sourceDir, targetDir, "copy", nil); err != nil {
 		t.Fatalf("run() copy with conflict error = %v", err)
 	}
 
@@ -789,7 +853,7 @@ func TestRunHashedFileOverwrite(t *testing.T) {
 
 	log = &logger{verbose: false, start: time.Now()}
 
-	if err := run(sourceDir, targetDir, "copy"); err != nil {
+	if err := run(sourceDir, targetDir, "copy", nil); err != nil {
 		t.Fatalf("run() copy with hash conflict error = %v", err)
 	}
 
@@ -803,5 +867,130 @@ func TestRunHashedFileOverwrite(t *testing.T) {
 	names := listDir(t, targetDir)
 	if len(names) != 2 {
 		t.Errorf("目标文件数 = %d, want 2; got %v", len(names), names)
+	}
+}
+
+// =============================================================================
+// ignoreSet 测试
+// =============================================================================
+
+func TestIgnoreSet(t *testing.T) {
+	is := newIgnoreSet([]string{"node_modules", "dist", "Thumbs.db"})
+
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"匹配忽略项", "node_modules", true},
+		{"匹配忽略项2", "dist", true},
+		{"匹配忽略项3", "Thumbs.db", true},
+		{"不匹配", "src", false},
+		{"不匹配空字符串", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := is.match(tt.input)
+			if got != tt.want {
+				t.Errorf("ignoreSet.match(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIgnoreSetEmpty(t *testing.T) {
+	is := newIgnoreSet(nil)
+	if is.match("anything") {
+		t.Error("空 ignoreSet 不应匹配任何名称")
+	}
+}
+
+// =============================================================================
+// --ignore 功能测试
+// =============================================================================
+
+func TestCollectEntriesWithIgnore(t *testing.T) {
+	dir := createTempDir(t)
+	writeFile(t, dir, "a.txt", "aaa")
+	writeFile(t, dir, "node_modules/pkg/b.txt", "bbb")
+	writeFile(t, dir, "dist/c.txt", "ccc")
+	writeFile(t, dir, "src/d.txt", "ddd")
+	writeFile(t, dir, "Thumbs.db", "thumb")
+
+	entries, err := collectEntries(dir, []string{"node_modules", "dist", "Thumbs.db"})
+	if err != nil {
+		t.Fatalf("collectEntries() error = %v", err)
+	}
+
+	if len(entries) != 2 {
+		t.Fatalf("collectEntries() 忽略后应剩 2 个文件，got %d", len(entries))
+	}
+
+	names := make(map[string]bool)
+	for _, e := range entries {
+		names[e.FileName] = true
+	}
+	if !names["a.txt"] {
+		t.Error("应包含 a.txt")
+	}
+	if !names["d.txt"] {
+		t.Error("应包含 d.txt")
+	}
+	if names["b.txt"] {
+		t.Error("应忽略 node_modules 下的 b.txt")
+	}
+	if names["c.txt"] {
+		t.Error("应忽略 dist 下的 c.txt")
+	}
+	if names["Thumbs.db"] {
+		t.Error("应忽略 Thumbs.db")
+	}
+}
+
+func TestRemoveEmptyDirsSkipsIgnoredDirs(t *testing.T) {
+	dir := createTempDir(t)
+	os.MkdirAll(filepath.Join(dir, "empty_sub"), 0755)
+	os.MkdirAll(filepath.Join(dir, "node_modules/empty"), 0755)
+
+	removed, err := removeEmptyDirs(dir, []string{"node_modules"})
+	if err != nil {
+		t.Fatalf("removeEmptyDirs() error = %v", err)
+	}
+
+	// 只有 empty_sub 应被删除
+	if removed != 1 {
+		t.Errorf("removeEmptyDirs() 删除数 = %d, want 1", removed)
+	}
+
+	if !fileExists(filepath.Join(dir, "node_modules")) {
+		t.Error("node_modules 目录不应被删除")
+	}
+}
+
+func TestRunWithIgnore(t *testing.T) {
+	sourceDir := createTempDir(t)
+	targetDir := createTempDir(t)
+
+	writeFile(t, sourceDir, "a.txt", "aaa")
+	writeFile(t, sourceDir, "node_modules/pkg/b.txt", "bbb")
+	writeFile(t, sourceDir, "src/c.txt", "ccc")
+
+	log = &logger{verbose: false, start: time.Now()}
+
+	if err := run(sourceDir, targetDir, "copy", []string{"node_modules"}); err != nil {
+		t.Fatalf("run() copy with ignore error = %v", err)
+	}
+
+	names := listDir(t, targetDir)
+	sort.Strings(names)
+	want := []string{"a.txt", "c.txt"}
+	if len(names) != len(want) {
+		t.Fatalf("目标文件数 = %d, want %d; got %v", len(names), len(want), names)
+	}
+	for i, n := range want {
+		if names[i] != n {
+			t.Errorf("目标文件[%d] = %q, want %q", i, names[i], n)
+		}
 	}
 }
