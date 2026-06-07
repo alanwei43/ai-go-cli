@@ -1,0 +1,66 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: auto-zip/go.mod
+
+      - name: Build all
+        run: bash build.sh
+
+      - name: Create release tag
+        id: tag
+        run: |
+          TAG="v$(date +'%Y%m%d-%H%M%S')"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          git tag "$TAG"
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          # Collect build artifacts info
+          {
+            echo "body<<EOF"
+            echo "## Build Artifacts"
+            echo ""
+            for dir in */; do
+              dir="${dir%/}"
+              if [ -d "$dir/build" ]; then
+                echo "### $dir"
+                echo ""
+                for f in "$dir/build/"*; do
+                  name=$(basename "$f")
+                  size=$(du -h "$f" | cut -f1)
+                  echo "- \`$name\` ($size)"
+                done
+                echo ""
+              fi
+            done
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: Release ${{ steps.tag.outputs.tag }}
+          body: ${{ steps.notes.outputs.body }}
+          files: |
+            */build/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
