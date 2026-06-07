@@ -1,0 +1,5 @@
+test-dir/
+archives/
+.claude/settings.local.json
+build/
+dist/
