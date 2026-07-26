@@ -101,10 +101,7 @@ func (a *App) newSubscribeCmd() *cobra.Command {
 				return nil
 			}
 
-			if err := a.loopWithInterval(time.Duration(interval)*time.Second, run); err != nil {
-				fmt.Fprintln(a.stderr, err)
-				os.Exit(1)
-			}
+			a.loopWithInterval(time.Duration(interval)*time.Second, run)
 		},
 	}
 
@@ -125,7 +122,8 @@ func (a *App) newSyncCmd() *cobra.Command {
 		Short: "同步本机 IP 信息到远程服务器",
 		Long: `将本机 IP 信息同步到远程服务器。
 
-会定时获取本机在指定 CIDR 范围内的 IP 地址，并通过 HTTP 请求同步到远程服务器。`,
+会定时获取本机在指定 CIDR 范围内的 IP 地址，取排序后的第一个 IP 通过 HTTP 请求同步到远程服务器；
+若与上次上报的 IP 相同则跳过本次请求。`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			url := args[0]
@@ -149,29 +147,49 @@ func (a *App) newSyncCmd() *cobra.Command {
 				httpMethod = http.MethodPut
 			}
 
+			var lastIP string
+
 			run := func() error {
+				// 每次重新获取，不缓存 IP 地址；netutil 内部已去重并按 ASCII 排序
 				ips, err := netutil.LocalIPv4StringsWithinCIDR(ipPrefix)
 				if err != nil {
 					return err
 				}
 
-				payload := syncPayload{
-					HostName: resolvedHostName,
-					IP:       ips,
+				fmt.Fprintf(a.stdout, "匹配的 IP 地址(%d): %s\n", len(ips), joinIPs(ips))
+
+				if len(ips) == 0 {
+					fmt.Fprintln(a.stdout, "未找到符合 --ip-prefix 的 IP 地址，跳过本次同步")
+					return nil
 				}
 
-				if err := a.pushHostInfo(httpMethod, url, payload); err != nil {
+				currentIP := ips[0]
+
+				if currentIP == lastIP {
+					fmt.Fprintf(a.stdout, "系统IP未发生变化: %s, 忽略同步操作\n", currentIP)
+					return nil
+				}
+
+				payload := syncPayload{
+					HostName: resolvedHostName,
+					IP:       []string{currentIP},
+				}
+
+				body, err := json.Marshal(payload)
+				if err != nil {
+					return fmt.Errorf("marshal request body: %w", err)
+				}
+				fmt.Fprintf(a.stdout, "传给远程接口的数据: %s\n", body)
+
+				if err := a.pushHostInfo(httpMethod, url, body); err != nil {
 					return err
 				}
 
-				fmt.Fprintf(a.stdout, "synced host %q with %d ip(s)\n", resolvedHostName, len(ips))
+				lastIP = currentIP
 				return nil
 			}
 
-			if err := a.loopWithInterval(time.Duration(interval)*time.Second, run); err != nil {
-				fmt.Fprintln(a.stderr, err)
-				os.Exit(1)
-			}
+			a.loopWithInterval(time.Duration(interval)*time.Second, run)
 		},
 	}
 
@@ -183,15 +201,18 @@ func (a *App) newSyncCmd() *cobra.Command {
 	return cmd
 }
 
-func (a *App) loopWithInterval(interval time.Duration, run func() error) error {
+// loopWithInterval 立即执行一次 run，随后按 interval 周期性执行。
+// 单次 run 失败（含接口调用失败）时仅在控制台打印日志，不退出程序、不立即重试，
+// 而是等待下一个 interval 再次执行。
+func (a *App) loopWithInterval(interval time.Duration, run func() error) {
 	if err := run(); err != nil {
-		return err
+		fmt.Fprintln(a.stderr, err)
 	}
 
 	for {
 		a.sleepFn(interval)
 		if err := run(); err != nil {
-			return err
+			fmt.Fprintln(a.stderr, err)
 		}
 	}
 }
@@ -221,12 +242,7 @@ func (a *App) fetchRemoteContent(url string) (string, error) {
 	return string(body), nil
 }
 
-func (a *App) pushHostInfo(method string, url string, payload syncPayload) error {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal request body: %w", err)
-	}
-
+func (a *App) pushHostInfo(method string, url string, body []byte) error {
 	req, err := http.NewRequest(method, url, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
@@ -250,4 +266,11 @@ func (a *App) pushHostInfo(method string, url string, payload syncPayload) error
 func hashText(text string) string {
 	sum := sha256.Sum256([]byte(text))
 	return hex.EncodeToString(sum[:])
+}
+
+func joinIPs(ips []string) string {
+	if len(ips) == 0 {
+		return "(none)"
+	}
+	return strings.Join(ips, ", ")
 }
