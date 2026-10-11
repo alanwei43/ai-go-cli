@@ -47,7 +47,7 @@ func TestCreateStoreArchive(t *testing.T) {
 			}
 			// Environment settings must not turn Store into compression.
 			t.Setenv("ZIPOPT", "-9")
-			a, err := New(source, target, "")
+			a, err := New(source, target, "", "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -97,6 +97,48 @@ func TestCreateStoreArchive(t *testing.T) {
 	}
 }
 
+func TestCustomZipNamePreservesArchiveContents(t *testing.T) {
+	requireZip(t)
+	for _, prefix := range []string{"rustfs-s3", `备份 数据 $name %i "引号"`} {
+		t.Run(prefix, func(t *testing.T) {
+			root := t.TempDir()
+			source, target := filepath.Join(root, "data"), filepath.Join(root, "archives")
+			writeFile(t, filepath.Join(source, "hello.txt"), "hello")
+			a, err := New(source, target, "", prefix)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path, err := a.Create(context.Background(), time.Date(2026, 3, 21, 10, 0, 0, 0, time.Local))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if path != filepath.Join(target, prefix+"_2026-03-21-10-00-00.zip") {
+				t.Fatalf("unexpected custom filename: %s", path)
+			}
+			archive, err := zip.OpenReader(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer archive.Close()
+			for _, file := range archive.File {
+				if file.Name == "data/hello.txt" {
+					reader, err := file.Open()
+					if err != nil {
+						t.Fatal(err)
+					}
+					data, err := io.ReadAll(reader)
+					reader.Close()
+					if err != nil || string(data) != "hello" {
+						t.Fatalf("unexpected archive contents: %q, %v", data, err)
+					}
+					return
+				}
+			}
+			t.Fatal("custom prefix changed source directory name inside ZIP")
+		})
+	}
+}
+
 func TestPasswordCompatibleWithUnzip(t *testing.T) {
 	requireZip(t)
 	if _, err := exec.LookPath("unzip"); err != nil {
@@ -108,7 +150,7 @@ func TestPasswordCompatibleWithUnzip(t *testing.T) {
 	password := " secret $`'\"[] password "
 	passwordFile := filepath.Join(root, "password.txt")
 	writeFile(t, passwordFile, password+"\r\n")
-	a, err := New(source, filepath.Join(root, "archives"), passwordFile)
+	a, err := New(source, filepath.Join(root, "archives"), passwordFile, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +191,7 @@ func TestNestedTargetExcluded(t *testing.T) {
 			if err := os.Symlink(target, alias); err != nil {
 				t.Fatal(err)
 			}
-			a, err := New(source, alias, "")
+			a, err := New(source, alias, "", "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -189,7 +231,7 @@ func TestSymlinksAreStoredWithoutFollowing(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	a, err := New(source, filepath.Join(root, "archives"), "")
+	a, err := New(source, filepath.Join(root, "archives"), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +265,7 @@ func TestEmptyDirectory(t *testing.T) {
 	if err := os.Mkdir(source, 0755); err != nil {
 		t.Fatal(err)
 	}
-	a, err := New(source, filepath.Join(root, "archives"), "")
+	a, err := New(source, filepath.Join(root, "archives"), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,13 +305,13 @@ func TestValidation(t *testing.T) {
 		{"nul password", source, target, nulPassword},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := New(test.source, test.target, test.password); err == nil {
+			if _, err := New(test.source, test.target, test.password, ""); err == nil {
 				t.Fatal("expected validation failure")
 			}
 		})
 	}
 	t.Setenv("PATH", t.TempDir())
-	if _, err := New(source, target, ""); err == nil || !strings.Contains(err.Error(), "zip") {
+	if _, err := New(source, target, "", ""); err == nil || !strings.Contains(err.Error(), "zip") {
 		t.Fatalf("expected missing zip error: %v", err)
 	}
 }
@@ -279,7 +321,7 @@ func TestFailureAndCancellationCleanUp(t *testing.T) {
 	root := t.TempDir()
 	source, target := filepath.Join(root, "note"), filepath.Join(root, "archives")
 	writeFile(t, filepath.Join(source, "hello.txt"), "hello")
-	a, err := New(source, target, "")
+	a, err := New(source, target, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

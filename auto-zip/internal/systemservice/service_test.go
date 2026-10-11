@@ -51,7 +51,7 @@ func TestUnitNames(t *testing.T) {
 
 func TestInstallAndDelete(t *testing.T) {
 	m, calls := testManager(t)
-	args := []string{"/data/中文 目录", "--target", "/backup/archives", "--password", "/data/password.txt", "--cron", "0 0 10 * * ?"}
+	args := []string{"/data/中文 目录", "--target", "/backup/archives", "--password", "/data/password.txt", "--zip-name", `备份 $name %i "引号"`, "--cron", "0 0 10 * * ?"}
 	if err := m.Add(context.Background(), "note-backup", args); err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestInstallAndDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{ownershipMarker, "Type=exec\n", "Restart=on-failure\n", "RestartSec=1h\n", `"/data/中文 目录" "--target" "/backup/archives"`, `"--cron" "0 0 10 * * ?"`, "WantedBy=multi-user.target\n"} {
+	for _, required := range []string{ownershipMarker, "Type=exec\n", "Restart=on-failure\n", "RestartSec=1h\n", `"/data/中文 目录" "--target" "/backup/archives"`, `"--zip-name" "备份 $name %%i \"引号\""`, `"--cron" "0 0 10 * * ?"`, "WantedBy=multi-user.target\n"} {
 		if !strings.Contains(string(content), required) {
 			t.Errorf("unit missing %q: %s", required, content)
 		}

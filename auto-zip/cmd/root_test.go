@@ -21,7 +21,7 @@ func TestHelp(t *testing.T) {
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	for _, text := range []string{"--target", "--password", "--cron", "--help", "--add-systemd", "--del-systemd", "六字段", "Linux/macOS", "启动时立即打包一次"} {
+	for _, text := range []string{"--target", "--password", "--zip-name", "--cron", "--help", "--add-systemd", "--del-systemd", "六字段", "Linux/macOS", "启动时立即打包一次"} {
 		if !strings.Contains(output.String(), text) {
 			t.Errorf("help missing %q: %s", text, &output)
 		}
@@ -45,8 +45,11 @@ func TestCommandArchivesImmediately(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("requires Linux/macOS")
 	}
-	for _, withCron := range []bool{false, true} {
-		t.Run(fmt.Sprint(withCron), func(t *testing.T) {
+	for _, test := range []struct {
+		withCron bool
+		zipName  string
+	}{{false, ""}, {true, ""}, {false, "rustfs-s3"}, {true, "备份 数据"}} {
+		t.Run(fmt.Sprintf("cron=%t/name=%s", test.withCron, test.zipName), func(t *testing.T) {
 			root := t.TempDir()
 			source, target := filepath.Join(root, "source"), filepath.Join(root, "target")
 			if err := os.Mkdir(source, 0755); err != nil {
@@ -63,7 +66,12 @@ func TestCommandArchivesImmediately(t *testing.T) {
 			command.SetOut(output)
 			command.SetErr(&errors)
 			args := []string{source, "-t", target}
-			if withCron {
+			prefix := "source"
+			if test.zipName != "" {
+				args = append(args, "--zip-name", test.zipName)
+				prefix = test.zipName
+			}
+			if test.withCron {
 				args = append(args, "--cron", time.Now().Add(time.Hour).Format("5 4 15")+" * * *")
 			}
 			command.SetArgs(args)
@@ -71,7 +79,7 @@ func TestCommandArchivesImmediately(t *testing.T) {
 				t.Fatal(err)
 			}
 			files, err := os.ReadDir(target)
-			if err != nil || len(files) != 1 || !strings.HasSuffix(files[0].Name(), ".zip") || !strings.Contains(output.String(), "打包完成:") {
+			if err != nil || len(files) != 1 || !strings.HasPrefix(files[0].Name(), prefix+"_") || !strings.HasSuffix(files[0].Name(), ".zip") || !strings.Contains(output.String(), "打包完成:") {
 				t.Fatalf("expected one startup archive: files=%v err=%v output=%s errors=%s", files, err, output, &errors)
 			}
 		})
@@ -118,15 +126,22 @@ func TestAddSystemdOnlyInstalls(t *testing.T) {
 		}
 		return path
 	}
-	for _, withCron := range []bool{true, false} {
-		t.Run(fmt.Sprint(withCron), func(t *testing.T) {
+	for _, test := range []struct {
+		withCron bool
+		zipName  string
+	}{{false, ""}, {true, ""}, {false, "rustfs-s3"}, {true, `备份 $name %i "引号"`}} {
+		t.Run(fmt.Sprintf("cron=%t/name=%s", test.withCron, test.zipName), func(t *testing.T) {
 			services := &fakeServices{}
 			command := newCommand(services)
 			var output bytes.Buffer
 			command.SetOut(&output)
 			args := []string{relative(source), "-t", relative(target), "-p", relative(password), "--add-systemd", "note-backup"}
 			want := []string{source, "--target", target, "--password", password}
-			if withCron {
+			if test.zipName != "" {
+				args = append(args, "--zip-name", test.zipName)
+				want = append(want, "--zip-name", test.zipName)
+			}
+			if test.withCron {
 				args = append(args, "--cron", "* * * * * *")
 				want = append(want, "--cron", "* * * * * *")
 			}
@@ -173,6 +188,7 @@ func TestInvalidSystemdArguments(t *testing.T) {
 		{"source", "--del-systemd", "backup"},
 		{"--del-systemd", "backup", "-t", "target"},
 		{"--del-systemd", "backup", "-p", "password"},
+		{"--del-systemd", "backup", "--zip-name", "rustfs-s3"},
 		{"--del-systemd", "backup", "--cron", "* * * * * *"},
 	} {
 		services := &fakeServices{}
@@ -195,6 +211,8 @@ func TestAddValidatesArchiveConfiguration(t *testing.T) {
 	for _, extra := range [][]string{
 		{"--cron", "invalid"},
 		{"--password", filepath.Join(root, "missing-password")},
+		{"--zip-name", ""},
+		{"--zip-name", "../backup"},
 	} {
 		services := &fakeServices{}
 		command := newCommand(services)
@@ -243,6 +261,23 @@ func TestInvalidCronDoesNotCreateTarget(t *testing.T) {
 	}
 	if _, err := os.Stat(target); !os.IsNotExist(err) {
 		t.Fatalf("invalid configuration created target: %v", err)
+	}
+}
+
+func TestInvalidZipNameDoesNotCreateTarget(t *testing.T) {
+	for _, name := range []string{"", "   ", "../backup", "backup/name", `backup\name`, "bad\nname", "bad\tname", "bad\x00name"} {
+		t.Run(fmt.Sprintf("%q", name), func(t *testing.T) {
+			root := t.TempDir()
+			target := filepath.Join(root, "target")
+			command := NewCommand()
+			command.SetArgs([]string{root, "-t", target, "--zip-name", name})
+			if err := command.Execute(); err == nil || !strings.Contains(err.Error(), "--zip-name") {
+				t.Fatalf("expected zip-name validation error: %v", err)
+			}
+			if _, err := os.Stat(target); !os.IsNotExist(err) {
+				t.Fatalf("invalid zip-name created target: %v", err)
+			}
+		})
 	}
 }
 

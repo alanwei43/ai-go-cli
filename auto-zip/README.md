@@ -6,6 +6,7 @@
 
 - 启动时立即打包指定目录一次，随后根据 `--cron` 参数决定定时自动打包
 - 支持密码加密（兼容标准 unzip）
+- 支持通过 `--zip-name` 自定义 ZIP 文件名前缀
 - 支持 cron 表达式调度
 - Linux 支持安装、启用和删除 systemd 系统服务
 - 仅打包不压缩（Store 模式）
@@ -25,6 +26,7 @@ auto-zip --del-systemd <service-name>
 | `[directory]` | 打包/安装服务时 | 需要打包的目录路径，支持绝对路径和相对路径 |
 | `--target, -t` | 打包/安装服务时 | zip 文件存放路径 |
 | `--password, -p` | 否 | 密码文件路径，文件内容作为 zip 压缩密码 |
+| `--zip-name <prefix>` | 否 | ZIP 文件名前缀，默认使用源目录名；生成 `<prefix>_年-月-日-时-分-秒.zip` |
 | `--cron` | 否 | cron 表达式，格式: `秒 分 时 日 月 周`。启动时立即打包一次，随后按表达式执行；默认每天当前时间执行一次 |
 | `--add-systemd <service-name>` | 否 | 仅 Linux：创建、安装、启用并启动 systemd 服务；必须配合目录和 `--target` |
 | `--del-systemd <service-name>` | 否 | 仅 Linux：单独使用，禁用、停止并删除本工具创建的服务及相关配置 |
@@ -38,7 +40,7 @@ auto-zip --del-systemd <service-name>
 
 ### systemd 服务管理（仅 Linux）
 
-仅 `--add-systemd` 和 `--del-systemd` 需要 sudo/root 权限，同时要求使用 systemd 的 Linux 系统和可用的 `systemctl`。普通定时打包以及 `--target`、`--password`、`--cron`、`--help` 不要求 sudo；只需对相应文件和目录具备正常读写权限。服务名以英文字母或数字开头，只允许字母、数字、点、下划线和连字符，可带或不带 `.service` 后缀。
+仅 `--add-systemd` 和 `--del-systemd` 需要 sudo/root 权限，同时要求使用 systemd 的 Linux 系统和可用的 `systemctl`。普通定时打包以及 `--target`、`--password`、`--zip-name`、`--cron`、`--help` 不要求 sudo；只需对相应文件和目录具备正常读写权限。服务名以英文字母或数字开头，只允许字母、数字、点、下划线和连字符，可带或不带 `.service` 后缀。
 
 ```bash
 # 校验打包参数，安装、启用开机启动并立即启动服务；当前命令随后退出
@@ -53,9 +55,9 @@ journalctl -u note-backup.service
 sudo /usr/local/bin/auto-zip --del-systemd note-backup
 ```
 
-`--add-systemd` 不在当前进程中启动打包调度，而是写入 `/etc/systemd/system/<service-name>.service`，执行 `systemctl daemon-reload` 和 `systemctl enable --now`。安装时会校验源目录、密码文件及 cron，并在需要时创建目标目录。
+`--add-systemd` 不在当前进程中启动打包调度，而是写入 `/etc/systemd/system/<service-name>.service`，执行 `systemctl daemon-reload` 和 `systemctl enable --now`。安装时会校验源目录、密码文件、ZIP 文件名前缀及 cron，并在需要时创建目标目录。
 
-服务执行当前 `auto-zip` 程序，参数与移除 `--add-systemd <service-name>` 后的命令等价：源目录、目标目录、密码文件都按安装时的当前目录转换为绝对路径，保留传入的 cron 和密码文件选项。路径中的中文、空格、引号、`$` 和 `%` 会按 systemd 语法处理。服务以 root 运行，工作目录为 `/`。使用位于固定路径的已编译程序安装服务；不要通过 `go run` 安装，临时可执行文件可能随后消失。
+服务执行当前 `auto-zip` 程序，参数与移除 `--add-systemd <service-name>` 后的命令等价：源目录、目标目录、密码文件都按安装时的当前目录转换为绝对路径，保留传入的 cron、密码文件和 `--zip-name` 选项。路径和文件名前缀中的中文、空格、引号、`$` 和 `%` 会按 systemd 语法处理。服务以 root 运行，工作目录为 `/`。使用位于固定路径的已编译程序安装服务；不要通过 `go run` 安装，临时可执行文件可能随后消失。
 
 systemd 对程序自身的路径有限制：`auto-zip` 可执行文件路径不能包含引号、反斜杠或控制字符；这些限制不影响源目录、目标目录和密码文件参数中的引号或反斜杠。
 
@@ -96,13 +98,16 @@ auto-zip ./blog --target /data/archives
 # 立即打包一次，之后每 5 分钟打包
 auto-zip ./data --target ./backup --cron "0 */5 * * * *"
 
+# 指定 ZIP 文件名前缀，生成 rustfs-s3_年-月-日-时-分-秒.zip
+auto-zip ./data --target ./backup --zip-name rustfs-s3 --cron "0 0 10 * * ?"
+
 # 立即打包一次，之后每周一凌晨 2 点打包
 auto-zip ./project --target ./backup --cron "0 0 2 * * 1"
 ```
 
 ## 输出文件命名
 
-打包生成的 zip 文件名格式：
+打包生成的 zip 文件名格式（未指定 `--zip-name` 时）：
 
 ```
 {目录名}_{年-月-日-时-分-秒}.zip
@@ -110,7 +115,9 @@ auto-zip ./project --target ./backup --cron "0 0 2 * * 1"
 
 示例：`note_2026-03-21-10-00-00.zip`
 
-ZIP 内保留源目录名称、子目录、隐藏文件和空目录。符号链接保存为链接，不跟随其指向的文件或目录。源目录是文件系统根目录时，文件名前缀使用 `root`，ZIP 内直接存放根目录的内容。
+传入 `--zip-name rustfs-s3` 后，文件名为 `rustfs-s3_2026-03-21-10-00-00.zip`。参数仅指定前缀，时间戳和 `.zip` 扩展名由程序自动追加。前缀支持中文、空格等普通文件名字符，原样保留；不能是空字符串或全空白，也不能包含 `/`、`\` 或控制字符（如换行、制表符、NUL）。
+
+ZIP 内保留源目录名称、子目录、隐藏文件和空目录，`--zip-name` 只改变归档文件名。符号链接保存为链接，不跟随其指向的文件或目录。源目录是文件系统根目录时，默认文件名前缀使用 `root`，也可用 `--zip-name` 指定；ZIP 内直接存放根目录的内容。
 
 ## 密码保护
 

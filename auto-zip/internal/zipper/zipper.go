@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode"
 )
 
 type Archiver struct {
@@ -17,12 +18,15 @@ type Archiver struct {
 	workingDir, operand, exclusion             string
 }
 
-func New(source, target, passwordFile string) (*Archiver, error) {
+func New(source, target, passwordFile, zipName string) (*Archiver, error) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		return nil, fmt.Errorf("auto-zip 仅支持 Linux/macOS")
 	}
 	if strings.TrimSpace(source) == "" || strings.TrimSpace(target) == "" {
 		return nil, fmt.Errorf("源目录和目标目录不能为空")
+	}
+	if zipName != "" && (strings.TrimSpace(zipName) == "" || strings.ContainsAny(zipName, `/\`) || strings.ContainsFunc(zipName, unicode.IsControl)) {
+		return nil, fmt.Errorf("--zip-name 必须为非空文件名前缀，不能包含路径分隔符或控制字符")
 	}
 	absSource, err := filepath.Abs(source)
 	if err != nil {
@@ -79,6 +83,9 @@ func New(source, target, passwordFile string) (*Archiver, error) {
 	// Filesystem roots have no parent directory to use as an archive prefix.
 	if source == filepath.Dir(source) {
 		archiver.name, archiver.workingDir, archiver.operand = "root", source, "."
+	}
+	if zipName != "" {
+		archiver.name = zipName
 	}
 	if relative, err := filepath.Rel(source, target); err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		entry := filepath.Join(filepath.Base(source), relative)
