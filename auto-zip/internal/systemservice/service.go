@@ -75,12 +75,18 @@ func (m *Manager) Add(ctx context.Context, name string, args []string) error {
 		return fmt.Errorf("检查服务文件: %w", err)
 	}
 	// Include units from vendor and runtime directories in the collision check.
-	output, err := m.command(ctx, "list-unit-files", "--type=service", "--no-legend", "--no-pager", "--", unit)
+	// Query the full inventory: some systemctl versions return exit status 1
+	// with no output when a name filter matches nothing. --full preserves long
+	// unit names so the first column can be compared exactly.
+	output, err := m.command(ctx, "list-unit-files", "--type=service", "--full", "--no-legend", "--no-pager")
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(string(output)) != "" {
-		return fmt.Errorf("systemd 已存在同名服务，不会覆盖: %s", unit)
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && fields[0] == unit {
+			return fmt.Errorf("systemd 已存在同名服务，不会覆盖: %s", unit)
+		}
 	}
 	binary, err := m.executable()
 	if err != nil {

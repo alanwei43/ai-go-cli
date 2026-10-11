@@ -70,7 +70,7 @@ func TestInstallAndDelete(t *testing.T) {
 		t.Fatal("recursive management command in unit")
 	}
 	want := []commandCall{
-		{[]string{"list-unit-files", "--type=service", "--no-legend", "--no-pager", "--", unit}},
+		{[]string{"list-unit-files", "--type=service", "--full", "--no-legend", "--no-pager"}},
 		{[]string{"daemon-reload"}},
 		{[]string{"enable", "--now", "--", unit}},
 	}
@@ -167,6 +167,91 @@ func TestExistingServicesAreProtected(t *testing.T) {
 				t.Fatal("modified existing service state:", *calls)
 			}
 		}
+	}
+}
+
+func TestServiceInventoryMatchesExactName(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		output  string
+		present bool
+	}{
+		{"unrelated", "other.service enabled enabled\n", false},
+		{"similar", "backup.service-extra.service disabled enabled\nold-backup.service static -\n", false},
+		{"existing", "other.service enabled enabled\nbackup.service disabled enabled\n", true},
+		{"masked", "backup.service masked enabled\n", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m, calls := testManager(t)
+			m.run = func(_ context.Context, args ...string) ([]byte, error) {
+				*calls = append(*calls, commandCall{append([]string(nil), args...)})
+				if args[0] == "list-unit-files" {
+					return []byte(test.output), nil
+				}
+				return nil, nil
+			}
+			err := m.Add(context.Background(), "backup", nil)
+			if test.present {
+				if err == nil || !strings.Contains(err.Error(), "systemd 已存在同名服务") {
+					t.Fatalf("existing service was not protected: %v", err)
+				}
+				if len(*calls) != 1 {
+					t.Fatalf("modified existing service: %v", *calls)
+				}
+				if _, err := os.Stat(filepath.Join(m.directory, "backup.service")); !os.IsNotExist(err) {
+					t.Fatalf("created unit despite existing service: %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("unrelated service blocked installation: %v", err)
+			}
+		})
+	}
+}
+
+func TestAddWithSystemctlInventory(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires systemctl on Linux")
+	}
+	systemctl, err := exec.LookPath("systemctl")
+	if err != nil {
+		t.Skip("systemctl not installed")
+	}
+	for _, present := range []bool{false, true} {
+		t.Run(fmt.Sprintf("present=%t", present), func(t *testing.T) {
+			m, calls := testManager(t)
+			root := t.TempDir()
+			vendor := filepath.Join(root, "usr/lib/systemd/system")
+			if err := os.MkdirAll(vendor, 0755); err != nil {
+				t.Fatal(err)
+			}
+			name := "autozip-rustfs-s3.service"
+			listed := name + "-other.service"
+			if present {
+				listed = name
+			}
+			if err := os.WriteFile(filepath.Join(vendor, listed), []byte("[Service]\nExecStart=/bin/true\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			m.run = func(ctx context.Context, args ...string) ([]byte, error) {
+				*calls = append(*calls, commandCall{append([]string(nil), args...)})
+				if args[0] == "list-unit-files" {
+					// Query real systemctl against an isolated vendor inventory;
+					// daemon-reload and enable never touch the host system.
+					return exec.CommandContext(ctx, systemctl, append([]string{"--root", root}, args...)...).CombinedOutput()
+				}
+				return nil, nil
+			}
+			err := m.Add(context.Background(), name, nil)
+			if present {
+				if err == nil || !strings.Contains(err.Error(), "systemd 已存在同名服务") || len(*calls) != 1 {
+					t.Fatalf("vendor service was not protected: %v; %v", err, *calls)
+				}
+			} else if err != nil {
+				t.Fatalf("installation of absent service failed: %v", err)
+			} else if _, err := os.Stat(filepath.Join(m.directory, name)); err != nil {
+				t.Fatalf("service file not created: %v", err)
+			}
+		})
 	}
 }
 
