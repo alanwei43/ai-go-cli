@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHelp(t *testing.T) {
@@ -20,10 +21,60 @@ func TestHelp(t *testing.T) {
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	for _, text := range []string{"--target", "--password", "--cron", "--help", "--add-systemd", "--del-systemd", "六字段", "Linux/macOS"} {
+	for _, text := range []string{"--target", "--password", "--cron", "--help", "--add-systemd", "--del-systemd", "六字段", "Linux/macOS", "启动时立即打包一次"} {
 		if !strings.Contains(output.String(), text) {
 			t.Errorf("help missing %q: %s", text, &output)
 		}
+	}
+}
+
+type cancelOnArchive struct {
+	bytes.Buffer
+	cancel context.CancelFunc
+}
+
+func (w *cancelOnArchive) Write(p []byte) (int, error) {
+	n, err := w.Buffer.Write(p)
+	if strings.Contains(w.Buffer.String(), "打包完成:") {
+		w.cancel()
+	}
+	return n, err
+}
+
+func TestCommandArchivesImmediately(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("requires Linux/macOS")
+	}
+	for _, withCron := range []bool{false, true} {
+		t.Run(fmt.Sprint(withCron), func(t *testing.T) {
+			root := t.TempDir()
+			source, target := filepath.Join(root, "source"), filepath.Join(root, "target")
+			if err := os.Mkdir(source, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(source, "hello.txt"), []byte("hello"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			output := &cancelOnArchive{cancel: cancel}
+			var errors bytes.Buffer
+			command := NewCommand()
+			command.SetOut(output)
+			command.SetErr(&errors)
+			args := []string{source, "-t", target}
+			if withCron {
+				args = append(args, "--cron", time.Now().Add(time.Hour).Format("5 4 15")+" * * *")
+			}
+			command.SetArgs(args)
+			if err := command.ExecuteContext(ctx); err != nil {
+				t.Fatal(err)
+			}
+			files, err := os.ReadDir(target)
+			if err != nil || len(files) != 1 || !strings.HasSuffix(files[0].Name(), ".zip") || !strings.Contains(output.String(), "打包完成:") {
+				t.Fatalf("expected one startup archive: files=%v err=%v output=%s errors=%s", files, err, output, &errors)
+			}
+		})
 	}
 }
 

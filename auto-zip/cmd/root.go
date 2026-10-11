@@ -27,7 +27,7 @@ func newCommand(services serviceManager) *cobra.Command {
 	command := &cobra.Command{
 		Use:     "auto-zip [directory] --target <save-path> [options]",
 		Short:   "使用系统 zip 定时打包目录（Store 模式）",
-		Long:    "按本地时间的六字段 cron（秒 分 时 日 月 周）定时打包目录。\n默认每天在启动时的时分秒执行，启动时不立即打包。\n需要 Linux/macOS 以及支持密码加密的系统 zip 命令。\nLinux 可用 --add-systemd 服务名安装并启用服务，或单独用 --del-systemd 服务名删除服务。",
+		Long:    "按本地时间的六字段 cron（秒 分 时 日 月 周）定时打包目录。\n启动时立即打包一次，然后按 cron 调度；默认每天在启动时的时分秒执行。\n需要 Linux/macOS 以及支持密码加密的系统 zip 命令。\nLinux 可用 --add-systemd 服务名安装并启用服务，或单独用 --del-systemd 服务名删除服务。",
 		Example: "  auto-zip ./note -t ./archives -p ./password.txt --cron \"0 0 10 * * ?\"\n  sudo auto-zip ./note -t ./archives --cron \"0 0 10 * * ?\" --add-systemd note-backup\n  sudo auto-zip --del-systemd note-backup",
 		Args: func(command *cobra.Command, args []string) error {
 			add, del := command.Flags().Changed("add-systemd"), command.Flags().Changed("del-systemd")

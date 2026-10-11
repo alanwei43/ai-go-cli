@@ -36,11 +36,17 @@ func Parse(expression string, now time.Time) (cron.Schedule, string, error) {
 	return schedule, spec, nil
 }
 
-// Run waits for the first scheduled time, then executes one job at a time.
+// Run executes a job immediately, then runs one job at each scheduled time.
 // Times missed during a job are skipped. Failures are reported and retried at
 // the next scheduled time; cancellation is passed to the job by its caller.
 func Run(ctx context.Context, schedule cron.Schedule, job func() error, errors io.Writer) error {
 	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err := job(); err != nil && ctx.Err() == nil {
+			fmt.Fprintf(errors, "打包失败: %v\n", err)
+		}
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -54,12 +60,6 @@ func Run(ctx context.Context, schedule cron.Schedule, job func() error, errors i
 			timer.Stop()
 			return nil
 		case <-timer.C:
-		}
-		if ctx.Err() != nil {
-			return nil
-		}
-		if err := job(); err != nil && ctx.Err() == nil {
-			fmt.Fprintf(errors, "打包失败: %v\n", err)
 		}
 	}
 }

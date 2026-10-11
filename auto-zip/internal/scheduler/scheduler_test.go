@@ -54,13 +54,9 @@ func TestRunContinuesAfterFailure(t *testing.T) {
 	defer cancel()
 	var output bytes.Buffer
 	calls := 0
-	started := time.Now()
 	err := Run(ctx, interval(5*time.Millisecond), func() error {
 		calls++
 		if calls == 1 {
-			if time.Since(started) < 5*time.Millisecond {
-				t.Error("job ran immediately")
-			}
 			return fmt.Errorf("temporary failure")
 		}
 		if calls == 3 {
@@ -73,15 +69,35 @@ func TestRunContinuesAfterFailure(t *testing.T) {
 	}
 }
 
+func TestRunImmediatelyBeforeCron(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	now := time.Now()
+	schedule, _, err := Parse(now.Add(time.Hour).Format("5 4 15")+" * * *", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	err = Run(ctx, schedule, func() error {
+		calls++
+		cancel()
+		return nil
+	}, io.Discard)
+	if err != nil || calls != 1 {
+		t.Fatalf("expected one startup job before cron: err=%v calls=%d", err, calls)
+	}
+}
+
 func TestRunCancellationWhileWaiting(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
+	calls := 0
 	err := Run(ctx, interval(time.Hour), func() error {
-		t.Fatal("job ran before scheduled time")
+		calls++
 		return nil
 	}, io.Discard)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || calls != 1 {
+		t.Fatalf("expected only the startup job: err=%v calls=%d", err, calls)
 	}
 }
 
