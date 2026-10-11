@@ -7,23 +7,63 @@
 - 定时自动打包指定目录
 - 支持密码加密（兼容标准 unzip）
 - 支持 cron 表达式调度
+- Linux 支持安装、启用和删除 systemd 系统服务
 - 仅打包不压缩（Store 模式）
-- 跨平台支持（Windows/macOS/Linux）
+- 仅需支持 Linux/macOS
 
 ## 使用方法
 
 ```
 auto-zip [directory] --target <save-path> [options]
+auto-zip --del-systemd <service-name>
 ```
 
 ### 参数说明
 
 | 参数 | 必填 | 说明 |
 |------|------|------|
-| `[directory]` | 是 | 需要打包的目录路径，支持绝对路径和相对路径 |
-| `--target, -t` | 是 | zip 文件存放路径 |
-| `--password` | 否 | 密码文件路径，文件内容作为 zip 压缩密码 |
+| `[directory]` | 打包/安装服务时 | 需要打包的目录路径，支持绝对路径和相对路径 |
+| `--target, -t` | 打包/安装服务时 | zip 文件存放路径 |
+| `--password, -p` | 否 | 密码文件路径，文件内容作为 zip 压缩密码 |
 | `--cron` | 否 | cron 表达式，格式: `秒 分 时 日 月 周`。默认每天当前时间执行一次 |
+| `--add-systemd <service-name>` | 否 | 仅 Linux：创建、安装、启用并启动 systemd 服务；必须配合目录和 `--target` |
+| `--del-systemd <service-name>` | 否 | 仅 Linux：单独使用，禁用、停止并删除本工具创建的服务及相关配置 |
+| `--help, -h` | 否 | 显示详细用法和参数 |
+
+程序在前台持续运行，按系统本地时区调度。默认每天在**启动时的时分秒**执行，启动时不立即打包。启动日志会显示调度表达式和下一次执行时间。按 `Ctrl+C` 或发送 `SIGTERM` 可退出；正在运行的 `zip` 会被终止，并清理临时文件。
+
+源路径必须是已有目录，目标目录不存在时自动创建。目标目录不能与源目录相同；目标目录位于源目录内部时，自动排除整个目标目录，避免把历史归档和临时文件再次打包。
+
+同一时间只执行一次打包；打包期间错过的调度不补跑。打包失败会输出错误，并等待下一次调度。ZIP 完整生成后才保存为最终文件名，同名文件不会被覆盖。
+
+### systemd 服务管理（仅 Linux）
+
+仅 `--add-systemd` 和 `--del-systemd` 需要 sudo/root 权限，同时要求使用 systemd 的 Linux 系统和可用的 `systemctl`。普通定时打包以及 `--target`、`--password`、`--cron`、`--help` 不要求 sudo；只需对相应文件和目录具备正常读写权限。服务名以英文字母或数字开头，只允许字母、数字、点、下划线和连字符，可带或不带 `.service` 后缀。
+
+```bash
+# 校验打包参数，安装、启用开机启动并立即启动服务；当前命令随后退出
+sudo /usr/local/bin/auto-zip ./note --target ./archives/note \
+  --password ./password.txt --cron "0 0 10 * * ?" --add-systemd note-backup
+
+# 查看状态和日志
+systemctl status note-backup.service
+journalctl -u note-backup.service
+
+# 单独执行删除：先禁用并停止，再删除服务文件及附加配置
+sudo /usr/local/bin/auto-zip --del-systemd note-backup
+```
+
+`--add-systemd` 不在当前进程中启动打包调度，而是写入 `/etc/systemd/system/<service-name>.service`，执行 `systemctl daemon-reload` 和 `systemctl enable --now`。安装时会校验源目录、密码文件及 cron，并在需要时创建目标目录。
+
+服务执行当前 `auto-zip` 程序，参数与移除 `--add-systemd <service-name>` 后的命令等价：源目录、目标目录、密码文件都按安装时的当前目录转换为绝对路径，保留传入的 cron 和密码文件选项。路径中的中文、空格、引号、`$` 和 `%` 会按 systemd 语法处理。服务以 root 运行，工作目录为 `/`。使用位于固定路径的已编译程序安装服务；不要通过 `go run` 安装，临时可执行文件可能随后消失。
+
+systemd 对程序自身的路径有限制：`auto-zip` 可执行文件路径不能包含引号、反斜杠或控制字符；这些限制不影响源目录、目标目录和密码文件参数中的引号或反斜杠。
+
+未传入 `--cron` 时，服务每次启动都按该次启动的时分秒设定每日调度；要固定每日执行时间，请显式传入 `--cron`。服务仍按正常打包规则等待下一次调度，启动时不立即打包。
+
+服务配置 `Restart=on-failure`、`RestartSec=1h`，进程失败退出后等待 1 小时自动重启。正常退出或主动停止不触发自动重启。单次打包失败仍由程序按下一次 cron 调度重试。
+
+两个管理参数不能同时使用；`--del-systemd` 不接受目录或打包参数。安装不会覆盖已有同名服务。如果启用或启动失败，服务文件保留，命令会报错，可检查日志或用 `--del-systemd` 清理。删除会移除启用链接、服务文件和 `<service-name>.service.d/` 附加配置，并重新加载 systemd；不删除源文件、ZIP 归档或程序。为避免误删，删除入口仅处理带有本工具标记的服务文件；文件不存在时无需重复删除。
 
 ### Cron 表达式格式
 
@@ -68,9 +108,13 @@ auto-zip ./project --target ./backup --cron "0 0 2 * * 1"
 
 示例：`note_2026-03-21-10-00-00.zip`
 
+ZIP 内保留源目录名称、子目录、隐藏文件和空目录。符号链接保存为链接，不跟随其指向的文件或目录。源目录是文件系统根目录时，文件名前缀使用 `root`，ZIP 内直接存放根目录的内容。
+
 ## 密码保护
 
 使用 `--password` 参数指定密码文件：
+
+启动时读取文件内容，去除末尾的 CR/LF 换行，保留密码前后的空格；空密码或包含 NUL 字符的密码会报错。运行期间修改密码文件需重启程序才能生效。
 
 ```bash
 # 创建密码文件
@@ -88,25 +132,24 @@ unzip -P your_password note_2026-03-21-10-00-00.zip
 
 ## 压缩方式
 
-程序使用 Store 模式（不压缩），仅将文件打包存储。适用于：
+程序使用 Store 模式（不压缩），仅将文件打包存储，底层使用系统原生 `zip -r0` 命令进行压缩，不要安装第三方类型压缩。
 
-- 文件本身已是压缩格式（如 .jpg, .mp4, .zip）
-- 需要快速打包/解压
-- CPU 资源受限场景
+密码使用系统 `zip -P` 的标准 ZIP 加密，兼容 `unzip -P`。程序直接调用系统命令，不使用第三方 Go 压缩库。忽略 `ZIP` 和 `ZIPOPT` 环境变量，以保持既定的打包方式。
 
 ## 开发
 
 ### 环境要求
 
 - Go 1.21 或更高版本
+- 运行平台：Linux/macOS，需在 `PATH` 中提供系统 `zip`（支持 `-P` 加密）
+- 测试还需要系统 `unzip`，用于验证加密归档的兼容性
 
 ### 依赖
 
 | 库 | 用途 |
 |---|---|
-| github.com/spf13/cobra | 命令行解析 |
+| github.com/spf13/cobra | 命令行参数及帮助 |
 | github.com/robfig/cron/v3 | cron 调度 |
-| github.com/yeka/zip | 带密码的 zip 支持 |
 
 ### 构建
 
@@ -120,13 +163,7 @@ go build -o auto-zip .
 # 跨平台构建
 GOOS=linux GOARCH=amd64 go build -o auto-zip-linux .
 GOOS=darwin GOARCH=amd64 go build -o auto-zip-macos .
-GOOS=windows GOARCH=amd64 go build -o auto-zip.exe .
+
+# 单元及系统 zip/unzip 集成测试
+go test ./...
 ```
-
-## 许可证
-
-MIT License
-
-## Bug
-
-有个bug，加密模式下，中文文件名是乱码。

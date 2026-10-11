@@ -1,132 +1,145 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
-	"os"
-	"os/signal"
-	"syscall"
+	"path/filepath"
+	"runtime"
 	"time"
 
 	"auto-zip/internal/scheduler"
+	"auto-zip/internal/systemservice"
 	"auto-zip/internal/zipper"
-
 	"github.com/spf13/cobra"
 )
 
-var (
-	// 命令行参数
-	passwordFile string
-	targetDir    string
-	cronExpr     string
-)
-
-// rootCmd 根命令
-var rootCmd = &cobra.Command{
-	Use:   "auto-zip [directory]",
-	Short: "定时对指定目录进行 zip 打包",
-	Long: `auto-zip 是一个命令行工具，用于定时对指定目录进行 zip 打包。
-
-支持密码加密、自定义输出路径和 cron 表达式调度。
-打包时不进行压缩，仅存储文件。`,
-	Example: `  # 每天的10点，自动把 ./note 目录打包成 zip 压缩包
-  auto-zip ./note --password ./password.txt --target ./archives/note --cron "0 0 10 * * ?"
-
-  # 每天的当前时间自动把 blog 文件夹打包成压缩包
-  auto-zip ./blog --target /data/archives`,
-	Args: cobra.ExactArgs(1),
-	Run:  runZip,
+func NewCommand() *cobra.Command {
+	return newCommand(systemservice.NewManager())
 }
 
-func init() {
-	rootCmd.Flags().StringVar(&passwordFile, "password", "", "密码文件路径，文件内容作为 zip 压缩密码")
-	rootCmd.Flags().StringVarP(&targetDir, "target", "t", "", "zip 文件存放路径（必填）")
-	rootCmd.Flags().StringVar(&cronExpr, "cron", "", "cron 表达式，格式: 秒 分 时 日 月 周（可选，默认每天当前时间执行一次）")
-
-	rootCmd.MarkFlagRequired("target")
+type serviceManager interface {
+	Add(context.Context, string, []string) error
+	Delete(context.Context, string) error
 }
 
-// Execute 执行命令
-func Execute() {
-	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
+func newCommand(services serviceManager) *cobra.Command {
+	var target, passwordFile, expression, addService, deleteService string
+	command := &cobra.Command{
+		Use:     "auto-zip [directory] --target <save-path> [options]",
+		Short:   "使用系统 zip 定时打包目录（Store 模式）",
+		Long:    "按本地时间的六字段 cron（秒 分 时 日 月 周）定时打包目录。\n默认每天在启动时的时分秒执行，启动时不立即打包。\n需要 Linux/macOS 以及支持密码加密的系统 zip 命令。\nLinux 可用 --add-systemd 服务名安装并启用服务，或单独用 --del-systemd 服务名删除服务。",
+		Example: "  auto-zip ./note -t ./archives -p ./password.txt --cron \"0 0 10 * * ?\"\n  sudo auto-zip ./note -t ./archives --cron \"0 0 10 * * ?\" --add-systemd note-backup\n  sudo auto-zip --del-systemd note-backup",
+		Args: func(command *cobra.Command, args []string) error {
+			add, del := command.Flags().Changed("add-systemd"), command.Flags().Changed("del-systemd")
+			if add && del {
+				return fmt.Errorf("--add-systemd 与 --del-systemd 不能同时使用")
+			}
+			if (add || del) && runtime.GOOS != "linux" {
+				return fmt.Errorf("systemd 参数仅支持 Linux")
+			}
+			if del {
+				if _, err := systemservice.UnitName(deleteService); err != nil {
+					return err
+				}
+				if len(args) != 0 || command.Flags().Changed("target") || command.Flags().Changed("password") || command.Flags().Changed("cron") {
+					return fmt.Errorf("--del-systemd 必须单独使用，不接受目录、target、password 或 cron")
+				}
+				return nil
+			}
+			if err := cobra.ExactArgs(1)(command, args); err != nil {
+				return err
+			}
+			if !command.Flags().Changed("target") || target == "" {
+				return fmt.Errorf("必须指定非空 --target 目标目录")
+			}
+			if add {
+				_, err := systemservice.UnitName(addService)
+				return err
+			}
+			return nil
+		},
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(command *cobra.Command, args []string) error {
+			if command.Flags().Changed("del-systemd") {
+				if err := services.Delete(command.Context(), deleteService); err != nil {
+					return err
+				}
+				unit, _ := systemservice.UnitName(deleteService)
+				fmt.Fprintf(command.OutOrStdout(), "已禁用、停止并删除 %s（不存在时无需删除）\n", unit)
+				return nil
+			}
+			now := time.Now()
+			schedule, spec, err := scheduler.Parse(expression, now)
+			if err != nil {
+				return err
+			}
+			archive, err := zipper.New(args[0], target, passwordFile)
+			if err != nil {
+				return err
+			}
+			if command.Flags().Changed("add-systemd") {
+				serviceArgs, err := archiveArguments(args[0], target, passwordFile, expression, command.Flags().Changed("cron"))
+				if err != nil {
+					return err
+				}
+				if err := services.Add(command.Context(), addService, serviceArgs); err != nil {
+					return err
+				}
+				unit, _ := systemservice.UnitName(addService)
+				fmt.Fprintf(command.OutOrStdout(), "已安装、启用并启动 %s，失败后间隔 1 小时自动重启\n", unit)
+				return nil
+			}
+			out := command.OutOrStdout()
+			fmt.Fprintf(out, "源目录: %s\n目标目录: %s\n调度: %s（本地时区 %s）\n下次打包: %s\n按 Ctrl+C 退出。\n",
+				archive.Source(), archive.Target(), spec, now.Location(), schedule.Next(now).Format(time.RFC3339))
+			return scheduler.Run(command.Context(), schedule, func() error {
+				path, err := archive.Create(command.Context(), time.Now())
+				if err == nil {
+					fmt.Fprintf(out, "打包完成: %s\n", path)
+				}
+				return err
+			}, command.ErrOrStderr())
+		},
 	}
+	command.Flags().StringVarP(&target, "target", "t", "", "ZIP 存放目录，必填；不存在时自动创建")
+	command.Flags().StringVarP(&passwordFile, "password", "p", "", "密码文件路径；读取内容并去除末尾 CR/LF")
+	command.Flags().StringVar(&expression, "cron", "", "六字段 cron：秒 分 时 日 月 周；默认每天启动时的时分秒")
+	command.Flags().StringVar(&addService, "add-systemd", "", "仅 Linux：服务名；配合目录和 --target 安装、启用并启动 systemd 服务（需 root）")
+	command.Flags().StringVar(&deleteService, "del-systemd", "", "仅 Linux：服务名；单独使用，禁用、停止并删除本工具创建的服务（需 root）")
+	command.Flags().BoolP("help", "h", false, "显示详细用法和参数")
+	// An explicitly empty cron must not silently select the default schedule.
+	command.PreRunE = func(command *cobra.Command, _ []string) error {
+		if command.Flags().Changed("cron") && expression == "" {
+			return fmt.Errorf("cron 表达式不能为空")
+		}
+		return nil
+	}
+	return command
 }
 
-// runZip 主逻辑
-func runZip(cmd *cobra.Command, args []string) {
-	srcDir := args[0]
-
-	// 验证源目录
-	if _, err := os.Stat(srcDir); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "错误: 源目录不存在: %s\n", srcDir)
-		os.Exit(1)
+// Rebuild the equivalent archive command without management flags, retaining
+// optional flags only when supplied. Absolute paths preserve their meaning
+// across systemd starts; unresolved symlinks retain the requested archive name.
+func archiveArguments(source, target, passwordFile, expression string, hasCron bool) ([]string, error) {
+	source, err := filepath.Abs(source)
+	if err != nil {
+		return nil, fmt.Errorf("解析服务源目录: %w", err)
 	}
-
-	// 读取密码（如果提供）
-	var password string
+	target, err = filepath.Abs(target)
+	if err != nil {
+		return nil, fmt.Errorf("解析服务目标目录: %w", err)
+	}
+	args := []string{source, "--target", target}
 	if passwordFile != "" {
-		data, err := os.ReadFile(passwordFile)
+		passwordFile, err = filepath.Abs(passwordFile)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "错误: 无法读取密码文件: %s\n", err)
-			os.Exit(1)
+			return nil, fmt.Errorf("解析服务密码文件: %w", err)
 		}
-		password = string(data)
-		// 去除末尾换行符
-		if len(password) > 0 && password[len(password)-1] == '\n' {
-			password = password[:len(password)-1]
-		}
+		args = append(args, "--password", passwordFile)
 	}
-
-	// 解析 cron 表达式
-	if cronExpr == "" {
-		cronExpr = scheduler.GetDefaultCronExpr()
-		fmt.Printf("未指定 cron 表达式，使用默认调度: %s（每天当前时间执行）\n", cronExpr)
-	} else {
-		if err := scheduler.ValidateCronExpr(cronExpr); err != nil {
-			fmt.Fprintf(os.Stderr, "错误: %s\n", err)
-			os.Exit(1)
-		}
+	if hasCron {
+		args = append(args, "--cron", expression)
 	}
-
-	// 创建调度器
-	sched := scheduler.New()
-
-	// 定义打包任务
-	zipTask := func() {
-		fmt.Printf("\n[%s] 开始打包目录: %s\n", getNowTime(), srcDir)
-		zipPath, err := zipper.CreateZip(srcDir, targetDir, password)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "打包失败: %s\n", err)
-			return
-		}
-		fmt.Printf("[%s] 打包完成: %s\n", getNowTime(), zipPath)
-	}
-
-	// 添加任务
-	if err := sched.AddTask(cronExpr, zipTask); err != nil {
-		fmt.Fprintf(os.Stderr, "错误: %s\n", err)
-		os.Exit(1)
-	}
-
-	// 立即执行一次
-	zipTask()
-
-	// 启动调度器
-	sched.Start()
-	defer sched.Stop()
-
-	fmt.Printf("\n调度器已启动，cron 表达式: %s\n", cronExpr)
-	fmt.Println("按 Ctrl+C 退出...")
-
-	// 等待中断信号
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-
-	fmt.Println("\n正在退出...")
-}
-
-// getNowTime 获取当前时间字符串
-func getNowTime() string {
-	return time.Now().Format("2006-01-02 15:04:05")
+	return args, nil
 }

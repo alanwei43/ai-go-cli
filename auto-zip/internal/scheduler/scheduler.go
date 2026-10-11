@@ -1,59 +1,65 @@
+// Package scheduler parses six-field cron expressions and runs serial jobs.
 package scheduler
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"strings"
 	"time"
 
 	"github.com/robfig/cron/v3"
 )
 
-// Scheduler 定时调度器
-type Scheduler struct {
-	cron *cron.Cron
-}
-
-// New 创建新的调度器
-func New() *Scheduler {
-	// 使用 WithSeconds 选项支持 6 字段 cron 表达式（秒 分 时 日 月 周）
-	return &Scheduler{
-		cron: cron.New(cron.WithSeconds()),
+func Parse(expression string, now time.Time) (cron.Schedule, string, error) {
+	if expression == "" {
+		expression = fmt.Sprintf("%d %d %d * * *", now.Second(), now.Minute(), now.Hour())
 	}
-}
-
-// AddTask 添加定时任务
-// cronExpr: cron 表达式，格式: "秒 分 时 日 月 周"
-// task: 要执行的任务函数
-func (s *Scheduler) AddTask(cronExpr string, task func()) error {
-	_, err := s.cron.AddFunc(cronExpr, task)
-	if err != nil {
-		return fmt.Errorf("添加定时任务失败: %w", err)
+	fields := strings.Fields(expression)
+	if len(fields) != 6 {
+		return nil, "", fmt.Errorf("cron 必须包含六个字段：秒 分 时 日 月 周")
 	}
-	return nil
-}
-
-// Start 启动调度器
-func (s *Scheduler) Start() {
-	s.cron.Start()
-}
-
-// Stop 停止调度器
-func (s *Scheduler) Stop() {
-	s.cron.Stop()
-}
-
-// GetDefaultCronExpr 获取默认的 cron 表达式
-// 默认为每天的当前时间执行一次
-func GetDefaultCronExpr() string {
-	now := time.Now()
-	return fmt.Sprintf("%d %d %d * * ?", now.Second(), now.Minute(), now.Hour())
-}
-
-// ValidateCronExpr 验证 cron 表达式是否有效
-func ValidateCronExpr(expr string) error {
+	for i, field := range fields {
+		if i != 3 && i != 5 && strings.Contains(field, "?") {
+			return nil, "", fmt.Errorf("cron 的 ? 只能用于日或周字段")
+		}
+	}
 	parser := cron.NewParser(cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
-	_, err := parser.Parse(expr)
+	spec := strings.Join(fields, " ")
+	schedule, err := parser.Parse(spec)
 	if err != nil {
-		return fmt.Errorf("无效的 cron 表达式: %w", err)
+		return nil, "", fmt.Errorf("无效 cron 表达式: %w", err)
 	}
-	return nil
+	if schedule.Next(now).IsZero() {
+		return nil, "", fmt.Errorf("cron 表达式没有可执行的日期")
+	}
+	return schedule, spec, nil
+}
+
+// Run waits for the first scheduled time, then executes one job at a time.
+// Times missed during a job are skipped. Failures are reported and retried at
+// the next scheduled time; cancellation is passed to the job by its caller.
+func Run(ctx context.Context, schedule cron.Schedule, job func() error, errors io.Writer) error {
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		next := schedule.Next(time.Now())
+		if next.IsZero() {
+			return fmt.Errorf("cron 表达式没有下一次执行时间")
+		}
+		timer := time.NewTimer(time.Until(next))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err := job(); err != nil && ctx.Err() == nil {
+			fmt.Fprintf(errors, "打包失败: %v\n", err)
+		}
+	}
 }
