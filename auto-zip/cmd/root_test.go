@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,7 +22,7 @@ func TestHelp(t *testing.T) {
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	for _, text := range []string{"--target", "--password", "--zip-name", "--cron", "--help", "--add-systemd", "--del-systemd", "六字段", "Linux/macOS", "启动时立即打包一次"} {
+	for _, text := range []string{"--target", "--password", "-n, --zip-name", "-c, --max-count", "--cron", "--help", "--add-systemd", "--del-systemd", "六字段", "Linux/macOS", "启动时立即打包一次", ".txt", "相对路径以 txt 所在目录为基准"} {
 		if !strings.Contains(output.String(), text) {
 			t.Errorf("help missing %q: %s", text, &output)
 		}
@@ -48,7 +49,8 @@ func TestCommandArchivesImmediately(t *testing.T) {
 	for _, test := range []struct {
 		withCron bool
 		zipName  string
-	}{{false, ""}, {true, ""}, {false, "rustfs-s3"}, {true, "备份 数据"}} {
+		list     bool
+	}{{false, "", false}, {true, "", false}, {false, "rustfs-s3", false}, {true, "备份_每日 数据", false}, {false, "", true}, {true, "list-backup", true}} {
 		t.Run(fmt.Sprintf("cron=%t/name=%s", test.withCron, test.zipName), func(t *testing.T) {
 			root := t.TempDir()
 			source, target := filepath.Join(root, "source"), filepath.Join(root, "target")
@@ -65,14 +67,38 @@ func TestCommandArchivesImmediately(t *testing.T) {
 			command := NewCommand()
 			command.SetOut(output)
 			command.SetErr(&errors)
-			args := []string{source, "-t", target}
+			input := source
+			if test.list {
+				input = filepath.Join(root, "backup.txt")
+				if err := os.WriteFile(input, []byte("source\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			args := []string{input, "-t", target}
+			nameFlag, countFlag := "--zip-name", "--max-count"
+			if test.withCron && test.zipName != "" {
+				nameFlag, countFlag = "-n", "-c"
+			}
 			prefix := "source"
+			if test.list {
+				prefix = "backup"
+			}
 			if test.zipName != "" {
-				args = append(args, "--zip-name", test.zipName)
+				args = append(args, nameFlag, test.zipName)
 				prefix = test.zipName
 			}
 			if test.withCron {
 				args = append(args, "--cron", time.Now().Add(time.Hour).Format("5 4 15")+" * * *")
+				args = append(args, countFlag, "1")
+				if err := os.MkdirAll(target, 0755); err != nil {
+					t.Fatal(err)
+				}
+				for i := 1; i <= 3; i++ {
+					path := filepath.Join(target, fmt.Sprintf("%s_2020010%d000000_%s.zip", prefix, i, strings.Repeat("a", 64)))
+					if err := os.WriteFile(path, []byte("old"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
 			}
 			command.SetArgs(args)
 			if err := command.ExecuteContext(ctx); err != nil {
@@ -81,6 +107,16 @@ func TestCommandArchivesImmediately(t *testing.T) {
 			files, err := os.ReadDir(target)
 			if err != nil || len(files) != 1 || !strings.HasPrefix(files[0].Name(), prefix+"_") || !strings.HasSuffix(files[0].Name(), ".zip") || !strings.Contains(output.String(), "打包完成:") {
 				t.Fatalf("expected one startup archive: files=%v err=%v output=%s errors=%s", files, err, output, &errors)
+			}
+			path := filepath.Join(target, files[0].Name())
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			suffix := fmt.Sprintf("_%x.zip", sha256.Sum256(data))
+			stamp := strings.TrimSuffix(strings.TrimPrefix(files[0].Name(), prefix+"_"), suffix)
+			if _, err := time.Parse("20060102150405", stamp); err != nil || len(stamp) != 14 || !strings.Contains(output.String(), path) {
+				t.Fatalf("invalid final filename or completion log: %s, output=%s", path, output)
 			}
 		})
 	}
@@ -129,21 +165,38 @@ func TestAddSystemdOnlyInstalls(t *testing.T) {
 	for _, test := range []struct {
 		withCron bool
 		zipName  string
-	}{{false, ""}, {true, ""}, {false, "rustfs-s3"}, {true, `备份 $name %i "引号"`}} {
+		maxCount string
+		list     bool
+	}{{false, "", "", false}, {true, "", "0", false}, {false, "rustfs-s3", "2", false}, {true, `备份 $name %i "引号"`, "10", false}, {true, "list-backup", "2", true}} {
 		t.Run(fmt.Sprintf("cron=%t/name=%s", test.withCron, test.zipName), func(t *testing.T) {
 			services := &fakeServices{}
 			command := newCommand(services)
 			var output bytes.Buffer
 			command.SetOut(&output)
-			args := []string{relative(source), "-t", relative(target), "-p", relative(password), "--add-systemd", "note-backup"}
-			want := []string{source, "--target", target, "--password", password}
+			input := source
+			if test.list {
+				input = filepath.Join(root, "backup.txt")
+				if err := os.WriteFile(input, []byte("中文目录\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			args := []string{relative(input), "-t", relative(target), "-p", relative(password), "--add-systemd", "note-backup"}
+			nameFlag, countFlag := "--zip-name", "--max-count"
+			if test.withCron && test.zipName != "" {
+				nameFlag, countFlag = "-n", "-c"
+			}
+			want := []string{input, "--target", target, "--password", password}
 			if test.zipName != "" {
-				args = append(args, "--zip-name", test.zipName)
+				args = append(args, nameFlag, test.zipName)
 				want = append(want, "--zip-name", test.zipName)
 			}
 			if test.withCron {
 				args = append(args, "--cron", "* * * * * *")
 				want = append(want, "--cron", "* * * * * *")
+			}
+			if test.maxCount != "" {
+				args = append(args, countFlag, test.maxCount)
+				want = append(want, "--max-count", test.maxCount)
 			}
 			command.SetArgs(args)
 			if err := command.Execute(); err != nil {
@@ -190,6 +243,7 @@ func TestInvalidSystemdArguments(t *testing.T) {
 		{"--del-systemd", "backup", "-p", "password"},
 		{"--del-systemd", "backup", "--zip-name", "rustfs-s3"},
 		{"--del-systemd", "backup", "--cron", "* * * * * *"},
+		{"--del-systemd", "backup", "--max-count", "0"},
 	} {
 		services := &fakeServices{}
 		command := newCommand(services)
@@ -213,6 +267,7 @@ func TestAddValidatesArchiveConfiguration(t *testing.T) {
 		{"--password", filepath.Join(root, "missing-password")},
 		{"--zip-name", ""},
 		{"--zip-name", "../backup"},
+		{"--max-count", "-1"},
 	} {
 		services := &fakeServices{}
 		command := newCommand(services)
@@ -242,6 +297,10 @@ func TestInvalidArguments(t *testing.T) {
 		{"source", "-t", ""}, {"source", "-t", "target", "--cron", ""},
 		{"source", "-t", "target", "--cron", "* * * * *"},
 		{"source", "-t", "target", "--unknown"},
+		{"source", "-t", "target", "--max-count", "-1"},
+		{"source", "-t", "target", "--max-count", "1.5"},
+		{"source", "-t", "target", "--max-count", "abc"},
+		{"source", "-t", "target", "--max-count", ""},
 	} {
 		command := NewCommand()
 		command.SetArgs(args)
@@ -261,6 +320,23 @@ func TestInvalidCronDoesNotCreateTarget(t *testing.T) {
 	}
 	if _, err := os.Stat(target); !os.IsNotExist(err) {
 		t.Fatalf("invalid configuration created target: %v", err)
+	}
+}
+
+func TestInvalidMaxCountDoesNotCreateTarget(t *testing.T) {
+	for _, count := range []string{"-1", "1.5", "abc", "", "999999999999999999999999"} {
+		t.Run(count, func(t *testing.T) {
+			root := t.TempDir()
+			target := filepath.Join(root, "target")
+			command := NewCommand()
+			command.SetArgs([]string{root, "-t", target, "--max-count", count})
+			if err := command.Execute(); err == nil || !strings.Contains(err.Error(), "max-count") {
+				t.Fatalf("expected max-count validation error: %v", err)
+			}
+			if _, err := os.Stat(target); !os.IsNotExist(err) {
+				t.Fatalf("invalid max-count created target: %v", err)
+			}
+		})
 	}
 }
 

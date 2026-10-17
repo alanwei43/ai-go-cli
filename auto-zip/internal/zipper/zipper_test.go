@@ -3,7 +3,9 @@ package zipper
 import (
 	"archive/zip"
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -34,6 +36,18 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+func assertArchiveName(t *testing.T, path, prefix string, now time.Time) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("%s_%s_%x.zip", prefix, now.Format("20060102150405"), sha256.Sum256(data))
+	if filepath.Base(path) != want {
+		t.Fatalf("ZIP filename must contain compact time and its actual SHA-256: got %s, want %s", filepath.Base(path), want)
+	}
+}
+
 func TestCreateStoreArchive(t *testing.T) {
 	requireZip(t)
 	for _, name := range []string{"note", "中文 空格", "-note", "note[*]?", `note\name`} {
@@ -47,7 +61,7 @@ func TestCreateStoreArchive(t *testing.T) {
 			}
 			// Environment settings must not turn Store into compression.
 			t.Setenv("ZIPOPT", "-9")
-			a, err := New(source, target, "", "")
+			a, err := New(source, target, "", "", 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -56,9 +70,7 @@ func TestCreateStoreArchive(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if filepath.Base(path) != name+"_2026-03-21-10-00-00.zip" {
-				t.Fatalf("unexpected filename: %s", path)
-			}
+			assertArchiveName(t, path, name, now)
 			archive, err := zip.OpenReader(path)
 			if err != nil {
 				t.Fatal(err)
@@ -104,7 +116,7 @@ func TestCustomZipNamePreservesArchiveContents(t *testing.T) {
 			root := t.TempDir()
 			source, target := filepath.Join(root, "data"), filepath.Join(root, "archives")
 			writeFile(t, filepath.Join(source, "hello.txt"), "hello")
-			a, err := New(source, target, "", prefix)
+			a, err := New(source, target, "", prefix, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -112,9 +124,7 @@ func TestCustomZipNamePreservesArchiveContents(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if path != filepath.Join(target, prefix+"_2026-03-21-10-00-00.zip") {
-				t.Fatalf("unexpected custom filename: %s", path)
-			}
+			assertArchiveName(t, path, prefix, time.Date(2026, 3, 21, 10, 0, 0, 0, time.Local))
 			archive, err := zip.OpenReader(path)
 			if err != nil {
 				t.Fatal(err)
@@ -150,14 +160,16 @@ func TestPasswordCompatibleWithUnzip(t *testing.T) {
 	password := " secret $`'\"[] password "
 	passwordFile := filepath.Join(root, "password.txt")
 	writeFile(t, passwordFile, password+"\r\n")
-	a, err := New(source, filepath.Join(root, "archives"), passwordFile, "")
+	a, err := New(source, filepath.Join(root, "archives"), passwordFile, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	path, err := a.Create(context.Background(), time.Now())
+	now := time.Now()
+	path, err := a.Create(context.Background(), now)
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertArchiveName(t, path, "note", now)
 	archive, err := zip.OpenReader(path)
 	if err != nil {
 		t.Fatal(err)
@@ -191,7 +203,7 @@ func TestNestedTargetExcluded(t *testing.T) {
 			if err := os.Symlink(target, alias); err != nil {
 				t.Fatal(err)
 			}
-			a, err := New(source, alias, "", "")
+			a, err := New(source, alias, "", "", 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -231,7 +243,7 @@ func TestSymlinksAreStoredWithoutFollowing(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	a, err := New(source, filepath.Join(root, "archives"), "", "")
+	a, err := New(source, filepath.Join(root, "archives"), "", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +277,7 @@ func TestEmptyDirectory(t *testing.T) {
 	if err := os.Mkdir(source, 0755); err != nil {
 		t.Fatal(err)
 	}
-	a, err := New(source, filepath.Join(root, "archives"), "", "")
+	a, err := New(source, filepath.Join(root, "archives"), "", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,13 +317,13 @@ func TestValidation(t *testing.T) {
 		{"nul password", source, target, nulPassword},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := New(test.source, test.target, test.password, ""); err == nil {
+			if _, err := New(test.source, test.target, test.password, "", 0); err == nil {
 				t.Fatal("expected validation failure")
 			}
 		})
 	}
 	t.Setenv("PATH", t.TempDir())
-	if _, err := New(source, target, "", ""); err == nil || !strings.Contains(err.Error(), "zip") {
+	if _, err := New(source, target, "", "", 0); err == nil || !strings.Contains(err.Error(), "zip") {
 		t.Fatalf("expected missing zip error: %v", err)
 	}
 }
@@ -321,7 +333,7 @@ func TestFailureAndCancellationCleanUp(t *testing.T) {
 	root := t.TempDir()
 	source, target := filepath.Join(root, "note"), filepath.Join(root, "archives")
 	writeFile(t, filepath.Join(source, "hello.txt"), "hello")
-	a, err := New(source, target, "", "")
+	a, err := New(source, target, "", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,5 +357,59 @@ func TestFailureAndCancellationCleanUp(t *testing.T) {
 	files, err := os.ReadDir(target)
 	if err != nil || len(files) != 0 {
 		t.Fatalf("partial archives left behind: %v, %v", files, err)
+	}
+}
+
+func TestArchiveHashTracksContents(t *testing.T) {
+	requireZip(t)
+	root := t.TempDir()
+	source, target := filepath.Join(root, "note"), filepath.Join(root, "archives")
+	file := filepath.Join(source, "large.txt")
+	writeFile(t, file, strings.Repeat("first content\n", 40000))
+	a, err := New(source, target, "", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 15, 10, 30, 0, 0, time.Local)
+	first, err := a.Create(context.Background(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertArchiveName(t, first, "note", now)
+	writeFile(t, file, strings.Repeat("second content\n", 40000))
+	second, err := a.Create(context.Background(), now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertArchiveName(t, second, "note", now.Add(time.Second))
+	firstHash := strings.Split(strings.TrimSuffix(filepath.Base(first), ".zip"), "_")[2]
+	secondHash := strings.Split(strings.TrimSuffix(filepath.Base(second), ".zip"), "_")[2]
+	if firstHash == secondHash {
+		t.Fatal("changed ZIP contents must change the filename hash")
+	}
+}
+
+func TestHashFailureDoesNotPublishArchive(t *testing.T) {
+	requireZip(t)
+	root := t.TempDir()
+	source, target := filepath.Join(root, "note"), filepath.Join(root, "archives")
+	writeFile(t, filepath.Join(source, "hello.txt"), "hello")
+	a, err := New(source, target, "", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate zip reporting success without leaving a readable output file.
+	broken := filepath.Join(root, "broken-zip")
+	writeFile(t, broken, "#!/bin/sh\nexit 0\n")
+	if err := os.Chmod(broken, 0700); err != nil {
+		t.Fatal(err)
+	}
+	a.executable = broken
+	if _, err := a.Create(context.Background(), time.Now()); err == nil || !strings.Contains(err.Error(), "SHA-256") {
+		t.Fatalf("expected hash error: %v", err)
+	}
+	files, err := os.ReadDir(target)
+	if err != nil || len(files) != 0 {
+		t.Fatalf("hash failure left partial output: %v, %v", files, err)
 	}
 }
